@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::{fs, io::{Read, Write}, net::{TcpListener, TcpStream}, path::PathBuf, process::Command, sync::{Arc, Mutex}, thread, time::Duration};
 use tauri::{menu::{MenuBuilder, MenuItemBuilder}, tray::{TrayIconBuilder, TrayIconEvent}, AppHandle, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_notification::NotificationExt;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Message { pub time: String, pub title: String, pub body: String }
@@ -198,12 +200,11 @@ fn platform_icon_path(app: &AppHandle, platform: &str) -> PathBuf {
 
 #[cfg(windows)]
 fn show_windows_toast(title: &str, body: &str, received_at: &str, icon_path: &PathBuf, sound_enabled: bool) -> Result<(), String> {
-    let text = format!("{}\n接收时间 {}", if body.trim().is_empty() { "新消息" } else { body }, received_at);
-    let mut toast = winrt_notification::Toast::new("com.xunda.notify")
-        .title("讯达通知中心")
-        .text1(title)
-        .text2(&text)
-        .image(icon_path.as_path(), "平台图标");
+    let mut toast = winrt_notification::Toast::new("XundaNotify")
+        .icon(icon_path.as_path(), winrt_notification::IconCrop::Circular, "平台图标")
+        .title(title)
+        .text1(if body.trim().is_empty() { "新消息" } else { body })
+        .text2(&format!("接收时间 {}", received_at));
     toast = if sound_enabled {
         toast.sound(Some(winrt_notification::Sound::Default))
     } else {
@@ -212,12 +213,41 @@ fn show_windows_toast(title: &str, body: &str, received_at: &str, icon_path: &Pa
     toast.show().map_err(|error| format!("{}", error))
 }
 
+#[cfg(windows)]
+fn register_windows_toast_app(app: &AppHandle) {
+    // Keep the same AUMID and Start Menu registration used by the Python app.
+    // Windows uses this registration for the source name shown in Action Center.
+    let exe = match std::env::current_exe() { Ok(path) => path, Err(_) => return };
+    let app_id = "XundaNotify";
+    let appdata = match std::env::var_os("APPDATA") { Some(value) => PathBuf::from(value), None => return };
+    let start_menu = appdata.join("Microsoft").join("Windows").join("Start Menu").join("Programs");
+    let shortcut = start_menu.join("XundaNotify.lnk");
+    let quote = |value: &str| format!("'{}'", value.replace('\'', "''"));
+    let exe_text = exe.to_string_lossy().to_string();
+    let start_text = start_menu.to_string_lossy().to_string();
+    let shortcut_text = shortcut.to_string_lossy().to_string();
+    let icon_path = platform_icon_path(app, "xunda");
+    let icon_uri = format!("file:///{}", icon_path.to_string_lossy().replace('\\', "/"));
+    let script = format!(
+        "$key='HKCU:\\Software\\Classes\\AppUserModelId\\{app_id}'; New-Item -Path $key -Force | Out-Null; Set-ItemProperty -Path $key -Name DisplayName -Value '讯达通知中心'; Set-ItemProperty -Path $key -Name IconUri -Value {icon}; Set-ItemProperty -Path $key -Name IconBackgroundColor -Value '#26A6D1'; New-Item -ItemType Directory -Path {start} -Force | Out-Null; $ws=New-Object -ComObject WScript.Shell; $sc=$ws.CreateShortcut({shortcut}); $sc.TargetPath={exe}; $sc.WorkingDirectory={working}; $sc.IconLocation={icon_location}; $sc.Description='讯达通知中心'; $sc.Save()",
+        app_id = app_id,
+        icon = quote(&icon_uri),
+        start = quote(&start_text),
+        shortcut = quote(&shortcut_text),
+        exe = quote(&exe_text),
+        working = quote(exe.parent().unwrap_or_else(|| std::path::Path::new(".")).to_string_lossy().as_ref()),
+        icon_location = quote(&format!("{},0", exe_text)),
+    );
+    let _ = Command::new("powershell.exe")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script])
+        .creation_flags(0x08000000)
+        .spawn();
+}
+
 fn notify(state: &Shared, app: &AppHandle, title: &str, body: &str, received_at: &str) {
     if *state.quiet_mode.lock().unwrap_or_else(|e| e.into_inner()) { return; }
     let mode = state.notification_mode.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    let message = Message { time: received_at.to_string(), title: title.to_string(), body: body.to_string() };
-    let notification_body = format!("{}\n{}\n接收时间 {}", title, if body.trim().is_empty() { "新消息" } else { body }, received_at);
-    if mode == "windows" || mode == "both" {
+    if mode == "windows" || mode == "software" || mode == "both" {
         let sound_enabled = *state.sound.lock().unwrap_or_else(|e| e.into_inner());
         let icon_path = platform_icon_path(app, platform_from_title(title));
         #[cfg(windows)]
@@ -225,16 +255,13 @@ fn notify(state: &Shared, app: &AppHandle, title: &str, body: &str, received_at:
         #[cfg(not(windows))]
         let result = {
             let mut builder = app.notification().builder()
-                .title("讯达通知中心")
-                .body(notification_body.clone())
+                .title(title)
+                .body(format!("{}\n接收时间 {}", if body.trim().is_empty() { "新消息" } else { body }, received_at))
                 .icon(icon_path.to_string_lossy().into_owned());
             if sound_enabled { builder = builder.sound("default"); }
             builder.show().map_err(|error| error.to_string())
         };
         if let Err(error) = result { write_log(state, format!("Windows 通知发送失败：{}", error)); }
-    }
-    if mode == "software" || mode == "both" {
-        let _ = app.emit("software-notification", message);
     }
 }
 
@@ -253,7 +280,7 @@ fn test_notification(state: State<'_, Shared>, app: AppHandle) { let now=Local::
 #[tauri::command]
 fn save_settings(input: SettingsInput, state: State<'_, Shared>) -> Result<(), String> { if !(1..=65535).contains(&input.port){return Err("端口范围无效".into())}; let notification_mode=match input.mode.as_str(){"Windows 通知"=>"windows", "软件通知"=>"software", _=>"both"}.to_string(); *state.port.lock().unwrap()=input.port; *state.notification_mode.lock().unwrap()=notification_mode.clone(); *state.sound.lock().unwrap()=input.sound; *state.quiet_mode.lock().unwrap()=input.quiet; save_settings_file(&StoredSettings{port:input.port,notification_mode,sound:input.sound,quiet_mode:input.quiet}); write_log(&state,format!("设置已保存：端口={}，通知方式={}，免打扰={}",input.port,input.mode,input.quiet)); Ok(()) }
 
-pub fn run() { clear_log(); let settings=load_settings(); let state:Shared=Arc::new(AppState{running:Mutex::new(false),port:Mutex::new(settings.port),history:Mutex::new(load_history()),logs:Mutex::new(String::new()),stop:Mutex::new(false),notification_mode:Mutex::new(settings.notification_mode),sound:Mutex::new(settings.sound),quiet_mode:Mutex::new(settings.quiet_mode)}); tauri::Builder::default().manage(state.clone()).plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| { if let Some(window)=app.get_webview_window("main") { let _=window.show(); let _=window.unminimize(); let _=window.set_focus(); } })).plugin(tauri_plugin_notification::init()).invoke_handler(tauri::generate_handler![snapshot,toggle_server,test_notification,save_settings,clear_logs,download_update,install_update]).setup(move |app| { let show=MenuItemBuilder::with_id("show","显示窗口").build(app)?; let quit=MenuItemBuilder::with_id("quit","退出程序").build(app)?; let menu=MenuBuilder::new(app).items(&[&show,&quit]).build()?; TrayIconBuilder::new().menu(&menu).show_menu_on_left_click(true).on_tray_icon_event(|tray,event| { if let TrayIconEvent::DoubleClick{..}=event { if let Some(window)=tray.app_handle().get_webview_window("main"){let _=window.show();let _=window.unminimize();let _=window.set_focus();} } }).on_menu_event(|app,event| { if event.id().as_ref()=="show" {if let Some(w)=app.get_webview_window("main"){let _=w.show();let _=w.unminimize();let _=w.set_focus();}} else if event.id().as_ref()=="quit" {app.exit(0);} }).build(app)?; Ok(()) }).on_window_event(|window,event| { if let WindowEvent::CloseRequested{api,..}=event { api.prevent_close(); let _=window.hide(); } }).build(tauri::generate_context!()).expect("error while running tauri application").run(|_,event| { if let tauri::RunEvent::ExitRequested{..}=event {clear_log();} }); }
+pub fn run() { clear_log(); let settings=load_settings(); let state:Shared=Arc::new(AppState{running:Mutex::new(false),port:Mutex::new(settings.port),history:Mutex::new(load_history()),logs:Mutex::new(String::new()),stop:Mutex::new(false),notification_mode:Mutex::new(settings.notification_mode),sound:Mutex::new(settings.sound),quiet_mode:Mutex::new(settings.quiet_mode)}); tauri::Builder::default().manage(state.clone()).plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| { if let Some(window)=app.get_webview_window("main") { let _=window.show(); let _=window.unminimize(); let _=window.set_focus(); } })).plugin(tauri_plugin_notification::init()).invoke_handler(tauri::generate_handler![snapshot,toggle_server,test_notification,save_settings,clear_logs,download_update,install_update]).setup(move |app| { #[cfg(windows)] register_windows_toast_app(app.handle()); let show=MenuItemBuilder::with_id("show","显示窗口").build(app)?; let quit=MenuItemBuilder::with_id("quit","退出程序").build(app)?; let menu=MenuBuilder::new(app).items(&[&show,&quit]).build()?; TrayIconBuilder::new().menu(&menu).show_menu_on_left_click(true).on_tray_icon_event(|tray,event| { if let TrayIconEvent::DoubleClick{..}=event { if let Some(window)=tray.app_handle().get_webview_window("main"){let _=window.show();let _=window.unminimize();let _=window.set_focus();} } }).on_menu_event(|app,event| { if event.id().as_ref()=="show" {if let Some(w)=app.get_webview_window("main"){let _=w.show();let _=w.unminimize();let _=w.set_focus();}} else if event.id().as_ref()=="quit" {app.exit(0);} }).build(app)?; Ok(()) }).on_window_event(|window,event| { if let WindowEvent::CloseRequested{api,..}=event { api.prevent_close(); let _=window.hide(); } }).build(tauri::generate_context!()).expect("error while running tauri application").run(|_,event| { if let tauri::RunEvent::ExitRequested{..}=event {clear_log();} }); }
 
 #[cfg(test)]
 mod tests {

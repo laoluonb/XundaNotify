@@ -1,6 +1,7 @@
 {
   "name": "xunda-notify",
-  "version": "1.6.4",
+  "version": "1.6.5",
+  "type": "module",
   "private": true,
   "scripts": {
     "dev": "vite",
