@@ -19,7 +19,13 @@ jobs:
         with:
           node-version: 22
       - name: Install frontend dependencies
-        run: npm install --no-audit --no-fund
+        run: |
+          npm config set registry https://registry.npmjs.org/
+          npm install --no-audit --no-fund --prefer-online
+        env:
+          npm_config_fetch_retries: 3
+          npm_config_fetch_retry_mintimeout: 20000
+          npm_config_fetch_retry_maxtimeout: 120000
       - name: Build Tauri installer
         uses: tauri-apps/tauri-action@v0
         env:
