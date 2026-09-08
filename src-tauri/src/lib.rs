@@ -2,7 +2,7 @@
 
 use chrono::Local;
 use serde::{Deserialize, Serialize};
-use std::{fs, io::{Read, Write}, net::{TcpListener, TcpStream}, path::PathBuf, sync::{Arc, Mutex}, thread, time::Duration};
+use std::{fs, io::{Read, Write}, net::{TcpListener, TcpStream}, path::PathBuf, process::Command, sync::{Arc, Mutex}, thread, time::Duration};
 use tauri::{menu::{MenuBuilder, MenuItemBuilder}, tray::{TrayIconBuilder, TrayIconEvent}, AppHandle, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_notification::NotificationExt;
 
@@ -29,6 +29,34 @@ fn clear_log() { let _=fs::create_dir_all(data_dir()); let _=fs::write(log_path(
 fn clear_logs(state: State<'_, Shared>) -> Result<(), String> {
     if let Ok(mut logs) = state.logs.lock() { logs.clear(); }
     clear_log();
+    Ok(())
+}
+
+fn updates_dir() -> PathBuf { std::env::temp_dir().join("XundaNotify-updates") }
+
+#[tauri::command]
+fn download_update(url: String, version: String) -> Result<String, String> {
+    let parsed = reqwest::Url::parse(&url).map_err(|e| format!("更新地址无效：{}", e))?;
+    let host = parsed.host_str().unwrap_or_default();
+    if parsed.scheme() != "https" || !matches!(host, "github.com" | "objects.githubusercontent.com" | "github-releases.githubusercontent.com") {
+        return Err("只允许从 GitHub 下载更新包".into());
+    }
+    let response = reqwest::blocking::Client::builder().user_agent("XundaNotify-Updater").build().map_err(|e| e.to_string())?.get(parsed).send().map_err(|e| format!("连接 GitHub 失败：{}", e))?;
+    if !response.status().is_success() { return Err(format!("下载失败：HTTP {}", response.status())); }
+    let filename = if url.to_ascii_lowercase().contains(".msi") { format!("XundaNotify-{}-x64.msi", version) } else { format!("XundaNotify-{}-x64-setup.exe", version) };
+    fs::create_dir_all(updates_dir()).map_err(|e| e.to_string())?;
+    let path = updates_dir().join(filename);
+    let bytes = response.bytes().map_err(|e| format!("读取安装包失败：{}", e))?;
+    fs::write(&path, bytes).map_err(|e| format!("保存安装包失败：{}", e))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn install_update(path: String) -> Result<(), String> {
+    let path = PathBuf::from(path);
+    if !path.exists() { return Err("安装包不存在，请重新下载".into()); }
+    if path.parent() != Some(updates_dir().as_path()) { return Err("安装包路径不受信任".into()); }
+    Command::new(&path).spawn().map_err(|e| format!("启动安装程序失败：{}", e))?;
     Ok(())
 }
 
@@ -162,9 +190,13 @@ fn platform_icon_path(app: &AppHandle, platform: &str) -> String {
         app.path().resource_dir().ok().map(|path| path.join("icons").join("notifications").join(&filename)),
         Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("icons").join("notifications").join(&filename)),
     ];
-    candidates.into_iter().flatten().find(|path| path.exists()).unwrap_or_else(|| {
+    let path = candidates.into_iter().flatten().find(|path| path.exists()).unwrap_or_else(|| {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("icons").join("notifications").join("xunda.png")
-    }).to_string_lossy().into_owned()
+    });
+    #[cfg(windows)]
+    { format!("file:///{}", path.to_string_lossy().replace('\\', "/")) }
+    #[cfg(not(windows))]
+    { path.to_string_lossy().into_owned() }
 }
 
 fn notify(state: &Shared, app: &AppHandle, title: &str, body: &str, received_at: &str) {
@@ -201,7 +233,7 @@ fn test_notification(state: State<'_, Shared>, app: AppHandle) { let now=Local::
 #[tauri::command]
 fn save_settings(input: SettingsInput, state: State<'_, Shared>) -> Result<(), String> { if !(1..=65535).contains(&input.port){return Err("端口范围无效".into())}; let notification_mode=match input.mode.as_str(){"Windows 通知"=>"windows", "软件通知"=>"software", _=>"both"}.to_string(); *state.port.lock().unwrap()=input.port; *state.notification_mode.lock().unwrap()=notification_mode.clone(); *state.sound.lock().unwrap()=input.sound; *state.quiet_mode.lock().unwrap()=input.quiet; save_settings_file(&StoredSettings{port:input.port,notification_mode,sound:input.sound,quiet_mode:input.quiet}); write_log(&state,format!("设置已保存：端口={}，通知方式={}，免打扰={}",input.port,input.mode,input.quiet)); Ok(()) }
 
-pub fn run() { clear_log(); let settings=load_settings(); let state:Shared=Arc::new(AppState{running:Mutex::new(false),port:Mutex::new(settings.port),history:Mutex::new(load_history()),logs:Mutex::new(String::new()),stop:Mutex::new(false),notification_mode:Mutex::new(settings.notification_mode),sound:Mutex::new(settings.sound),quiet_mode:Mutex::new(settings.quiet_mode)}); tauri::Builder::default().manage(state.clone()).plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| { if let Some(window)=app.get_webview_window("main") { let _=window.show(); let _=window.unminimize(); let _=window.set_focus(); } })).plugin(tauri_plugin_notification::init()).invoke_handler(tauri::generate_handler![snapshot,toggle_server,test_notification,save_settings,clear_logs]).setup(move |app| { let show=MenuItemBuilder::with_id("show","显示窗口").build(app)?; let quit=MenuItemBuilder::with_id("quit","退出程序").build(app)?; let menu=MenuBuilder::new(app).items(&[&show,&quit]).build()?; TrayIconBuilder::new().menu(&menu).show_menu_on_left_click(true).on_tray_icon_event(|tray,event| { if let TrayIconEvent::DoubleClick{..}=event { if let Some(window)=tray.app_handle().get_webview_window("main"){let _=window.show();let _=window.unminimize();let _=window.set_focus();} } }).on_menu_event(|app,event| { if event.id().as_ref()=="show" {if let Some(w)=app.get_webview_window("main"){let _=w.show();let _=w.unminimize();let _=w.set_focus();}} else if event.id().as_ref()=="quit" {app.exit(0);} }).build(app)?; Ok(()) }).on_window_event(|window,event| { if let WindowEvent::CloseRequested{api,..}=event { api.prevent_close(); let _=window.hide(); } }).build(tauri::generate_context!()).expect("error while running tauri application").run(|_,event| { if let tauri::RunEvent::ExitRequested{..}=event {clear_log();} }); }
+pub fn run() { clear_log(); let settings=load_settings(); let state:Shared=Arc::new(AppState{running:Mutex::new(false),port:Mutex::new(settings.port),history:Mutex::new(load_history()),logs:Mutex::new(String::new()),stop:Mutex::new(false),notification_mode:Mutex::new(settings.notification_mode),sound:Mutex::new(settings.sound),quiet_mode:Mutex::new(settings.quiet_mode)}); tauri::Builder::default().manage(state.clone()).plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| { if let Some(window)=app.get_webview_window("main") { let _=window.show(); let _=window.unminimize(); let _=window.set_focus(); } })).plugin(tauri_plugin_notification::init()).invoke_handler(tauri::generate_handler![snapshot,toggle_server,test_notification,save_settings,clear_logs,download_update,install_update]).setup(move |app| { let show=MenuItemBuilder::with_id("show","显示窗口").build(app)?; let quit=MenuItemBuilder::with_id("quit","退出程序").build(app)?; let menu=MenuBuilder::new(app).items(&[&show,&quit]).build()?; TrayIconBuilder::new().menu(&menu).show_menu_on_left_click(true).on_tray_icon_event(|tray,event| { if let TrayIconEvent::DoubleClick{..}=event { if let Some(window)=tray.app_handle().get_webview_window("main"){let _=window.show();let _=window.unminimize();let _=window.set_focus();} } }).on_menu_event(|app,event| { if event.id().as_ref()=="show" {if let Some(w)=app.get_webview_window("main"){let _=w.show();let _=w.unminimize();let _=w.set_focus();}} else if event.id().as_ref()=="quit" {app.exit(0);} }).build(app)?; Ok(()) }).on_window_event(|window,event| { if let WindowEvent::CloseRequested{api,..}=event { api.prevent_close(); let _=window.hide(); } }).build(tauri::generate_context!()).expect("error while running tauri application").run(|_,event| { if let tauri::RunEvent::ExitRequested{..}=event {clear_log();} }); }
 
 #[cfg(test)]
 mod tests {
