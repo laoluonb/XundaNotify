@@ -1,6 +1,6 @@
 [package]
 name = "xunda-notify"
-version = "1.2.0"
+version = "1.2.6"
 description = "讯达通知中心"
 authors = ["Xunda"]
 edition = "2021"
@@ -10,10 +10,10 @@ name = "xunda_notify_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2.0.0", features = [] }
+tauri-build = { version = "2.5.2", features = [] }
 
 [dependencies]
-tauri = { version = "2.0.0", features = ["tray-icon"] }
+tauri = { version = "2.11.1", features = ["tray-icon"] }
 tauri-plugin-notification = "2.3.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
