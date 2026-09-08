@@ -1,10 +1,10 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "XundaNotify",
-  "version": "1.2.9",
+  "version": "1.3.0",
   "identifier": "com.xunda.notify",
   "build": { "beforeDevCommand": "npm run dev", "beforeBuildCommand": "npm run build", "devUrl": "http://localhost:1420", "frontendDist": "../dist" },
   "app": { "windows": [{ "label": "main", "title": "讯达通知中心", "width": 1180, "height": 760, "minWidth": 980, "minHeight": 640, "resizable": true, "fullscreen": false }], "withGlobalTauri": false, "security": { "csp": null }, "trayIcon": { "iconPath": "icons/icon.ico", "iconAsTemplate": false, "tooltip": "讯达通知中心" } },
-  "bundle": { "active": true, "targets": ["nsis", "msi"], "icon": ["icons/icon.ico"], "resources": ["icons/notifications/*.png"], "windows": { "webviewInstallMode": { "type": "embedBootstrapper" }, "nsis": { "installMode": "currentUser" } }
+  "bundle": { "active": true, "targets": ["nsis", "msi"], "icon": ["icons/icon.ico"], "resources": ["icons/notifications/*.png"], "windows": { "webviewInstallMode": { "type": "embedBootstrapper" }, "nsis": { "installMode": "perMachine", "languages": ["SimpChinese"], "displayLanguageSelector": false }, "wix": { "language": "zh-CN" } }
   }
 }

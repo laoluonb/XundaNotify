@@ -28,7 +28,7 @@ let snapshot: Snapshot = {
   sound: true,
   quiet_mode: false,
 };
-const CURRENT_VERSION = "1.2.9";
+const CURRENT_VERSION = "1.3.0";
 let updateState: UpdateState = { status: "idle" };
 let settingsDirty = false;
 
