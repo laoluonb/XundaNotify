@@ -56,7 +56,7 @@ fn install_update(path: String) -> Result<(), String> {
     let path = PathBuf::from(path);
     if !path.exists() { return Err("安装包不存在，请重新下载".into()); }
     if path.parent() != Some(updates_dir().as_path()) { return Err("安装包路径不受信任".into()); }
-    Command::new(&path).spawn().map_err(|e| format!("启动安装程序失败：{}", e))?;
+    if path.extension().and_then(|value| value.to_str()).map(|value| value.eq_ignore_ascii_case("msi")).unwrap_or(false) { Command::new("msiexec.exe").args(["/i", path.to_string_lossy().as_ref()]).spawn().map_err(|e| format!("启动安装程序失败：{}", e))?; } else { Command::new(&path).spawn().map_err(|e| format!("启动安装程序失败：{}", e))?; }
     Ok(())
 }
 
@@ -251,3 +251,4 @@ mod tests {
         assert_eq!(body, "29.9的羽绒服退款");
     }
 }
+
