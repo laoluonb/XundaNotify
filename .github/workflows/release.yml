@@ -1,0 +1,37 @@
+name: Build Windows Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install frontend dependencies
+        run: npm install --no-audit --no-fund
+      - name: Build Tauri installer
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: XundaNotify ${{ github.ref_name }}
+          releaseBody: |
+            讯达通知中心 Windows 安装包
+            - Tauri + Rust 后端
+            - Windows 通知、托盘驻留、Webhook 接收
+            - 关闭窗口隐藏到托盘，退出时清理本次运行日志
+          releaseDraft: false
+          prerelease: false
