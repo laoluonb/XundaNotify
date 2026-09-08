@@ -14,6 +14,8 @@ pub struct Snapshot { pub running: bool, pub port: u16, pub address: String, pub
 
 #[derive(Deserialize)]
 pub struct SettingsInput { pub port: u16, pub mode: String, pub sound: bool, pub quiet: bool }
+#[derive(Clone, Serialize, Deserialize)]
+struct StoredSettings { port: u16, notification_mode: String, sound: bool, quiet_mode: bool }
 
 pub struct AppState { pub running: Mutex<bool>, pub port: Mutex<u16>, pub history: Mutex<Vec<Message>>, pub logs: Mutex<String>, pub stop: Mutex<bool>, pub notification_mode: Mutex<String>, pub sound: Mutex<bool>, pub quiet_mode: Mutex<bool> }
 pub type Shared = Arc<AppState>;
@@ -23,7 +25,19 @@ fn log_path() -> PathBuf { data_dir().join("xunda-tauri.log") }
 fn write_log(state: &Shared, line: impl AsRef<str>) { let line = format!("{}  {}\n", Local::now().format("%Y-%m-%d %H:%M:%S"), line.as_ref()); if let Ok(mut logs)=state.logs.lock(){ logs.push_str(&line); } let _=fs::create_dir_all(data_dir()); let _=fs::OpenOptions::new().create(true).append(true).open(log_path()).and_then(|mut f| f.write_all(line.as_bytes())); }
 fn clear_log() { let _=fs::create_dir_all(data_dir()); let _=fs::write(log_path(), ""); }
 
+#[tauri::command]
+fn clear_logs(state: State<'_, Shared>) -> Result<(), String> {
+    if let Ok(mut logs) = state.logs.lock() { logs.clear(); }
+    clear_log();
+    Ok(())
+}
+
 fn history_path() -> PathBuf { data_dir().join("history-tauri.json") }
+fn settings_path() -> PathBuf { data_dir().join("settings-tauri.json") }
+fn load_settings() -> StoredSettings {
+    fs::read_to_string(settings_path()).ok().and_then(|text| serde_json::from_str::<StoredSettings>(&text).ok()).unwrap_or(StoredSettings { port: 8080, notification_mode: "both".into(), sound: true, quiet_mode: false })
+}
+fn save_settings_file(settings: &StoredSettings) { let _=fs::create_dir_all(data_dir()); let _=fs::write(settings_path(), serde_json::to_string_pretty(settings).unwrap_or_else(|_| "{}".into())); }
 fn load_history() -> Vec<Message> {
     fs::read_to_string(history_path()).ok().and_then(|text| serde_json::from_str::<Vec<Message>>(&text).ok()).unwrap_or_default()
 }
@@ -111,6 +125,6 @@ fn toggle_server(state: State<'_, Shared>, app: AppHandle) { let mut running=sta
 #[tauri::command]
 fn test_notification(state: State<'_, Shared>, app: AppHandle) { let now=Local::now().format("%H:%M:%S").to_string(); let message=Message{time:now.clone(),title:"讯达-测试通知".into(),body:"新消息：讯达通知中心运行正常".into()}; state.history.lock().unwrap().insert(0,message.clone()); save_history(&state.history.lock().unwrap()); write_log(&state,"发送测试通知"); notify(&state,&app,&message.title,&message.body,&now); let _=app.emit("message", message); }
 #[tauri::command]
-fn save_settings(input: SettingsInput, state: State<'_, Shared>) -> Result<(), String> { if !(1..=65535).contains(&input.port){return Err("端口范围无效".into())}; *state.port.lock().unwrap()=input.port; *state.notification_mode.lock().unwrap()=match input.mode.as_str(){"Windows 通知"=>"windows", "软件通知"=>"software", _=>"both"}.into(); *state.sound.lock().unwrap()=input.sound; *state.quiet_mode.lock().unwrap()=input.quiet; write_log(&state,format!("设置已保存：端口={}，通知方式={}，免打扰={}",input.port,input.mode,input.quiet)); Ok(()) }
+fn save_settings(input: SettingsInput, state: State<'_, Shared>) -> Result<(), String> { if !(1..=65535).contains(&input.port){return Err("端口范围无效".into())}; let notification_mode=match input.mode.as_str(){"Windows 通知"=>"windows", "软件通知"=>"software", _=>"both"}.to_string(); *state.port.lock().unwrap()=input.port; *state.notification_mode.lock().unwrap()=notification_mode.clone(); *state.sound.lock().unwrap()=input.sound; *state.quiet_mode.lock().unwrap()=input.quiet; save_settings_file(&StoredSettings{port:input.port,notification_mode,sound:input.sound,quiet_mode:input.quiet}); write_log(&state,format!("设置已保存：端口={}，通知方式={}，免打扰={}",input.port,input.mode,input.quiet)); Ok(()) }
 
-pub fn run() { clear_log(); let state:Shared=Arc::new(AppState{running:Mutex::new(false),port:Mutex::new(8080),history:Mutex::new(load_history()),logs:Mutex::new(String::new()),stop:Mutex::new(false),notification_mode:Mutex::new("both".into()),sound:Mutex::new(true),quiet_mode:Mutex::new(false)}); tauri::Builder::default().manage(state.clone()).plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| { if let Some(window)=app.get_webview_window("main") { let _=window.show(); let _=window.unminimize(); let _=window.set_focus(); } })).plugin(tauri_plugin_notification::init()).invoke_handler(tauri::generate_handler![snapshot,toggle_server,test_notification,save_settings]).setup(move |app| { let show=MenuItemBuilder::with_id("show","显示窗口").build(app)?; let quit=MenuItemBuilder::with_id("quit","退出程序").build(app)?; let menu=MenuBuilder::new(app).items(&[&show,&quit]).build()?; TrayIconBuilder::new().menu(&menu).show_menu_on_left_click(false).on_tray_icon_event(|tray,event| { if let TrayIconEvent::DoubleClick{..}=event { if let Some(window)=tray.app_handle().get_webview_window("main"){let _=window.show();let _=window.unminimize();let _=window.set_focus();} } }).on_menu_event(|app,event| { if event.id().as_ref()=="show" {if let Some(w)=app.get_webview_window("main"){let _=w.show();let _=w.unminimize();let _=w.set_focus();}} else if event.id().as_ref()=="quit" {app.exit(0);} }).build(app)?; Ok(()) }).on_window_event(|window,event| { if let WindowEvent::CloseRequested{api,..}=event { api.prevent_close(); let _=window.hide(); } }).build(tauri::generate_context!()).expect("error while running tauri application").run(|_,event| { if let tauri::RunEvent::ExitRequested{..}=event {clear_log();} }); }
+pub fn run() { clear_log(); let settings=load_settings(); let state:Shared=Arc::new(AppState{running:Mutex::new(false),port:Mutex::new(settings.port),history:Mutex::new(load_history()),logs:Mutex::new(String::new()),stop:Mutex::new(false),notification_mode:Mutex::new(settings.notification_mode),sound:Mutex::new(settings.sound),quiet_mode:Mutex::new(settings.quiet_mode)}); tauri::Builder::default().manage(state.clone()).plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| { if let Some(window)=app.get_webview_window("main") { let _=window.show(); let _=window.unminimize(); let _=window.set_focus(); } })).plugin(tauri_plugin_notification::init()).invoke_handler(tauri::generate_handler![snapshot,toggle_server,test_notification,save_settings,clear_logs]).setup(move |app| { let show=MenuItemBuilder::with_id("show","显示窗口").build(app)?; let quit=MenuItemBuilder::with_id("quit","退出程序").build(app)?; let menu=MenuBuilder::new(app).items(&[&show,&quit]).build()?; TrayIconBuilder::new().menu(&menu).show_menu_on_left_click(true).on_tray_icon_event(|tray,event| { if let TrayIconEvent::DoubleClick{..}=event { if let Some(window)=tray.app_handle().get_webview_window("main"){let _=window.show();let _=window.unminimize();let _=window.set_focus();} } }).on_menu_event(|app,event| { if event.id().as_ref()=="show" {if let Some(w)=app.get_webview_window("main"){let _=w.show();let _=w.unminimize();let _=w.set_focus();}} else if event.id().as_ref()=="quit" {app.exit(0);} }).build(app)?; Ok(()) }).on_window_event(|window,event| { if let WindowEvent::CloseRequested{api,..}=event { api.prevent_close(); let _=window.hide(); } }).build(tauri::generate_context!()).expect("error while running tauri application").run(|_,event| { if let tauri::RunEvent::ExitRequested{..}=event {clear_log();} }); }
