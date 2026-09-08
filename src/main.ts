@@ -29,7 +29,7 @@ let snapshot: Snapshot = {
   sound: true,
   quiet_mode: false,
 };
-const CURRENT_VERSION = "1.6.2";
+const CURRENT_VERSION = "1.6.4";
 let updateState: UpdateState = { status: "idle" };
 let settingsDirty = false;
 let saveState = "";
