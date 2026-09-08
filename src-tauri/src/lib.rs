@@ -41,7 +41,7 @@ fn parse_message(raw: &str) -> (String, String) {
     let mut input = raw.trim().trim_start_matches("/?msg=").to_string();
     if let Some(query) = input.strip_prefix('?') { input = query.to_string(); }
     if input.trim_start().starts_with('{') {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(input) {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&input) {
             let get = |keys: &[&str]| keys.iter().find_map(|key| value.get(*key).and_then(|v| v.as_str()).map(clean_value)).unwrap_or_default();
             package=get(&["package","pkg","from","app_package","app包名"]); sender=get(&["sender","nickname","name","title","通知标题"]); group=get(&["group","group_name","chat","conversation","群名"]); content=get(&["content","msg","message","text","body","通知内容"]);
         }
