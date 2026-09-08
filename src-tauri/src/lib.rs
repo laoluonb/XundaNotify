@@ -184,7 +184,7 @@ fn platform_from_title(title: &str) -> &'static str {
     else { "xunda" }
 }
 
-fn platform_icon_path(app: &AppHandle, platform: &str) -> String {
+fn platform_icon_path(app: &AppHandle, platform: &str) -> PathBuf {
     let filename = format!("{}.png", platform);
     let candidates = [
         app.path().resource_dir().ok().map(|path| path.join("icons").join("notifications").join(&filename)),
@@ -193,10 +193,23 @@ fn platform_icon_path(app: &AppHandle, platform: &str) -> String {
     let path = candidates.into_iter().flatten().find(|path| path.exists()).unwrap_or_else(|| {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("icons").join("notifications").join("xunda.png")
     });
-    #[cfg(windows)]
-    { format!("file:///{}", path.to_string_lossy().replace('\\', "/")) }
-    #[cfg(not(windows))]
-    { path.to_string_lossy().into_owned() }
+    path
+}
+
+#[cfg(windows)]
+fn show_windows_toast(title: &str, body: &str, received_at: &str, icon_path: &PathBuf, sound_enabled: bool) -> Result<(), String> {
+    let text = format!("{}\n接收时间 {}", if body.trim().is_empty() { "新消息" } else { body }, received_at);
+    let mut toast = winrt_notification::Toast::new("com.xunda.notify")
+        .title("讯达通知中心")
+        .text1(title)
+        .text2(&text)
+        .image(icon_path.as_path(), "平台图标");
+    toast = if sound_enabled {
+        toast.sound(Some(winrt_notification::Sound::Default))
+    } else {
+        toast.sound(None)
+    };
+    toast.show().map_err(|error| format!("{}", error))
 }
 
 fn notify(state: &Shared, app: &AppHandle, title: &str, body: &str, received_at: &str) {
@@ -205,12 +218,19 @@ fn notify(state: &Shared, app: &AppHandle, title: &str, body: &str, received_at:
     let message = Message { time: received_at.to_string(), title: title.to_string(), body: body.to_string() };
     let notification_body = format!("{}\n{}\n接收时间 {}", title, if body.trim().is_empty() { "新消息" } else { body }, received_at);
     if mode == "windows" || mode == "both" {
-        let mut builder = app.notification().builder()
-            .title("讯达通知中心")
-            .body(notification_body.clone())
-            .icon(platform_icon_path(app, platform_from_title(title)));
-        if *state.sound.lock().unwrap_or_else(|e| e.into_inner()) { builder = builder.sound("default"); }
-        let result = builder.show();
+        let sound_enabled = *state.sound.lock().unwrap_or_else(|e| e.into_inner());
+        let icon_path = platform_icon_path(app, platform_from_title(title));
+        #[cfg(windows)]
+        let result = show_windows_toast(title, body, received_at, &icon_path, sound_enabled);
+        #[cfg(not(windows))]
+        let result = {
+            let mut builder = app.notification().builder()
+                .title("讯达通知中心")
+                .body(notification_body.clone())
+                .icon(icon_path.to_string_lossy().into_owned());
+            if sound_enabled { builder = builder.sound("default"); }
+            builder.show().map_err(|error| error.to_string())
+        };
         if let Err(error) = result { write_log(state, format!("Windows 通知发送失败：{}", error)); }
     }
     if mode == "software" || mode == "both" {
